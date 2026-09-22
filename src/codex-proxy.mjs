@@ -2,11 +2,11 @@ import http from "node:http";
 import https from "node:https";
 import { createHash, randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
-import { availableTiers, shouldUseExactModel } from "./config.mjs";
-import { askJev } from "./router.mjs";
-import { decide } from "./policy.mjs";
-import { log } from "./log.mjs";
-import { writeDecision, writeStatus } from "./status.mjs";
+import { availableTiers, shouldUseExactModel } from "./lib/config.mjs";
+import { askJev } from "./lib/router.mjs";
+import { decide } from "./lib/policy.mjs";
+import { log } from "./lib/log.mjs";
+import { writeDecision, writeStatus } from "./lib/status.mjs";
 
 const CHATGPT_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const API_BASE_URL = "https://api.openai.com/v1";

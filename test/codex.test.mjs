@@ -16,7 +16,7 @@ import {
   upstreamFor,
 } from "../src/codex-proxy.mjs";
 import { codexArgs, installCodexSkill } from "../src/codex-cli.mjs";
-import { readStatus } from "../src/status.mjs";
+import { readStatus } from "../src/lib/status.mjs";
 
 test("Codex uses a temporary authenticated Jev provider", () => {
   const args = codexArgs("http://127.0.0.1:1234", ["--sandbox", "read-only"]);

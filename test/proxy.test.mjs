@@ -21,8 +21,9 @@ test("only the sentinel model is routed", () => {
 test("the sentinel is not mistaken for a real tier", () => {
   assert.equal(tierOf("jev-router"), null);
 });
-import { tierOf, isAuto } from "../src/config.mjs";
-import { writeDecision, writeStatus, readStatus, pruneStale, STATUS_DIR } from "../src/status.mjs";
+import { isAuto } from "../src/lib/config.mjs";
+import { tierOf } from "../src/lib/tiers/claude.mjs";
+import { writeDecision, writeStatus, readStatus, pruneStale, STATUS_DIR } from "../src/lib/status.mjs";
 import { mkdirSync, statSync, utimesSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -218,6 +219,11 @@ test("reads a plain string prompt as a new turn", () => {
 
 test("reads a text block prompt as a new turn", () => {
   const body = withTools([{ role: "user", content: [{ type: "text", text: "fix the bug" }] }]);
+  assert.equal(newTurnPrompt(body), "fix the bug");
+});
+
+test("newTurnPrompt ignores a trailing system message", () => {
+  const body = withTools([{ role: "user", content: "fix the bug" }, { role: "system", content: "Today's date is 2026-09-21." }]);
   assert.equal(newTurnPrompt(body), "fix the bug");
 });
 

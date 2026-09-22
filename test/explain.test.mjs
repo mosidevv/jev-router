@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { formatExplanation } from "../src/explain.mjs";
+import { formatExplanation } from "../src/lib/explain.mjs";
 
 test("formats the last routing decision", () => {
   const output = formatExplanation({

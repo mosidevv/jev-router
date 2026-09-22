@@ -2,19 +2,12 @@ import http from "node:http";
 import https from "node:https";
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
-import {
-  TIERS,
-  tierOf,
-  idOf,
-  availableTiers,
-  tierSpec,
-  isAuto,
-  shouldUseExactModel,
-} from "./config.mjs";
-import { askJev } from "./router.mjs";
-import { decide } from "./policy.mjs";
-import { log } from "./log.mjs";
-import { writeDecision, writeStatus } from "./status.mjs";
+import { availableTiers, isAuto, shouldUseExactModel } from "./lib/config.mjs";
+import { TIERS, tierOf, idOf, tierSpec, CONTEXT_WINDOW_TOKENS } from "./lib/tiers/claude.mjs";
+import { askJev } from "./lib/router.mjs";
+import { decide } from "./lib/policy.mjs";
+import { log } from "./lib/log.mjs";
+import { writeDecision, writeStatus } from "./lib/status.mjs";
 
 const ANTHROPIC_BASE_URL = "https://api.anthropic.com";
 const debug = (line) => process.env.JEV_DEBUG && log(line);
@@ -54,7 +47,8 @@ export function sanitizeSchema(node) {
  */
 export function newTurnPrompt(body) {
   if (!Array.isArray(body?.tools) || body.tools.length === 0) return null; // auxiliary call
-  const last = body?.messages?.[body.messages.length - 1];
+  // Claude Code can append a trailing system message (date, hook context) after the prompt.
+  const last = body?.messages?.findLast((m) => m.role !== "system");
   if (!last || last.role !== "user") return null;
   let text;
   if (typeof last.content === "string") {
@@ -224,7 +218,13 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
               const available = [...new Set(models.map((model) => model.tier))];
               const currentModel = state.model ?? modelForTier(models, current);
               const contextTokens = Math.round(JSON.stringify(body.messages).length / 4);
-              const jev = await route({ prompt, current: currentModel, contextTokens, models });
+              const jev = await route({
+                prompt,
+                current: currentModel,
+                contextTokens,
+                models,
+                contextWindow: CONTEXT_WINDOW_TOKENS,
+              });
               const chosen = models.find((model) => model.id === jev?.choice);
               const tierAnswer = jev && { ...jev, choice: chosen?.tier };
               const { tier, reason } = decide({
