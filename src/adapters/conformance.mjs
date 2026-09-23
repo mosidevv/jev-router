@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { readStatus, STATUS_DIR } from "../../src/lib/status.mjs";
+import { readStatus, STATUS_DIR } from "../lib/status.mjs";
 
 const listen = (server) => new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 

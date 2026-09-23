@@ -6,6 +6,7 @@ import { askJev } from "./lib/router.mjs";
 import { decide } from "./lib/policy.mjs";
 import { log } from "./lib/log.mjs";
 import { writeDecision, writeStatus } from "./lib/status.mjs";
+import { validateAdapter } from "./adapters/index.mjs";
 
 const debug = (line) => process.env.JEV_DEBUG && log(line);
 
@@ -41,7 +42,7 @@ export async function genericProxy({
   route = askJev,
   catalog = new Map(),
 } = {}) {
-  if (!adapter) throw new Error("adapter is required");
+  validateAdapter(adapter);
 
   // Tier routed for each conversation's turn in flight, reused by its follow-ups.
   const conversations = new Map();

@@ -17,7 +17,7 @@ import {
 } from "../../src/codex-proxy.mjs";
 import { codexArgs, installCodexSkill } from "../../src/codex-cli.mjs";
 import { readStatus } from "../../src/lib/status.mjs";
-import { runAdapterConformance } from "./conformance.mjs";
+import { runAdapterConformance } from "../../src/adapters/conformance.mjs";
 
 const codexTools = { type: "additional_tools", role: "developer", tools: [{}] };
 

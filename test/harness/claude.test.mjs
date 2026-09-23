@@ -18,7 +18,7 @@ import { tierOf } from "../../src/lib/tiers/claude.mjs";
 // Store behavior itself is covered in status.test.mjs against an isolated directory.
 import { readStatus } from "../../src/lib/status.mjs";
 import { readSavedModel, restoreSavedModel } from "../../src/settings.mjs";
-import { runAdapterConformance } from "./conformance.mjs";
+import { runAdapterConformance } from "../../src/adapters/conformance.mjs";
 
 const claudeMetadata = (statusId) => ({
   user_id: JSON.stringify({ session_id: statusId }),
