@@ -1,5 +1,9 @@
 export { genericProxy } from "../generic-proxy.mjs";
 export { AUTO_MODEL, TIER_NAMES, isAuto } from "../lib/config.mjs";
+// The native integration pattern: a harness that owns its own model calls wants the
+// per-turn decision without an HTTP hop. The exports map blocks deep imports, so this
+// re-export is the only way a consumer of the package can reach it. See docs/adapters.md.
+export { routeTurn } from "../lib/route-turn.mjs";
 
 /**
  * @typedef {"haiku" | "sonnet" | "opus" | "fable"} AdapterTier

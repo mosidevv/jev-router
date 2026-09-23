@@ -22,6 +22,9 @@ export * from "./policy.mjs";
 // The Jev call itself, including timeout, deadline, and retry handling.
 export * from "./router.mjs";
 
+// One complete per-turn decision for native callers and HTTP proxy adapters alike.
+export * from "./route-turn.mjs";
+
 // Per-session decision records, read back by `jev-explain` and the status line.
 export * from "./status.mjs";
 

@@ -2,6 +2,19 @@
 
 An adapter translates one coding CLI's HTTP protocol into Jev Router's shared routing pipeline. The public runtime is `jev-router`; the reusable HTTP conformance suite is `jev-router/conformance`. The package is ESM-only and requires Node.js 20.12 or newer.
 
+## Two integration patterns: proxy and native
+
+Jev Router supports two ways to put the same per-turn decision into a harness:
+
+- **Proxy pattern:** use `genericProxy` when the harness is an existing CLI or application you do not control, but it accepts a custom API base URL. An adapter recognizes routed requests, and the proxy rewrites the sentinel to a real model before forwarding upstream. See [`examples/orchestrator/run-proxy.mjs`](../examples/orchestrator/run-proxy.mjs).
+- **Native pattern:** use `routeTurn` when you control the agent loop, orchestrator, or tool and it already owns the provider call. Pass the prompt, current tier and exact model, available model catalog, context estimate, context window, and a tier-to-default-model resolver. The result contains the chosen `tier`, exact `model`, policy `reason`, confidence, metrics, retained Jev exchange, and timestamp. See [`examples/orchestrator/run-native.mjs`](../examples/orchestrator/run-native.mjs).
+
+Choose native routing when the model-selection point is inside code you own. It avoids a local HTTP hop and lets that code call its provider SDK with the returned exact model ID. Choose the proxy when changing the harness is impractical and its HTTP protocol can be expressed through the adapter contract below.
+
+`routeTurn({ prompt, current, currentModel, models, contextTokens, contextWindow, statusId, getDefaultModel, route })` performs the shared decision only: it filters disabled tiers, calls the injected `route` function (or the core router by default), maps the returned model ID to a tier, applies the policy ladder, resolves the exact model, and records the decision when `statusId` is non-empty. It deliberately does **not** rewrite a request body, manage conversation state, ingest a provider catalog, or decorate a response. Those are harness responsibilities; `genericProxy` and its adapter hooks provide them for the proxy pattern.
+
+The native caller must update its own current tier/model after each decision, estimate context consistently, keep its catalog and default-model mapping accurate, call its provider, and decide how status IDs map to its sessions. The proxy does those protocol and lifecycle jobs around the same `routeTurn` decision.
+
 ## The request pipeline
 
 `genericProxy({ adapter, upstreamURL, route, catalog })` validates the adapter once, starts a loopback HTTP server, and then handles each request in this order:
@@ -10,7 +23,7 @@ An adapter translates one coding CLI's HTTP protocol into Jev Router's shared ro
 2. The proxy buffers the request body and tries to parse JSON. If parsing succeeds, `normalizeRequest(body)` runs first when supplied.
 3. `isRoutingRequest(req, body)` decides whether the request carries the router's sentinel model. A false result takes the manual-choice branch described below.
 4. For a routed request, `conversationKey(body)` finds its routing state and `newTurnPrompt(body)` classifies it:
-   - A new user prompt calls `getModels(catalog)`, `getDefaultModel(currentTier)`, the configured `route` function, and the shared policy. The chosen tier and exact model are saved. `statusId` selects the status record, then `applyTier(body, tier, model)` must replace the sentinel before forwarding.
+   - A new user prompt calls `getModels(catalog)` and `getDefaultModel(currentTier)`, then passes those values to `routeTurn`. The chosen tier and exact model are saved. `statusId` selects the status record, then `applyTier(body, tier, model)` must replace the sentinel before forwarding.
    - A tool continuation returns `null` from `newTurnPrompt`. It does not call the router again. `getDefaultModel(tier)` may supply a cold-start model, and `applyTier` rewrites the request with the conversation's saved model.
    - A reserved explanation prompt is treated as a manual/status request rather than sent to the router. `statusId` is resolved, then `getDefaultModel` and `applyTier` still ensure that the sentinel is replaced.
 5. For a non-routing request, `isManualChoice(req, body)` runs when supplied. If it returns true, `conversationKey` and `statusId` identify the manual-status record. The chosen model and body otherwise pass through unchanged.

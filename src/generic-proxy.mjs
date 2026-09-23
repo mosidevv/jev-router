@@ -1,11 +1,10 @@
 import http from "node:http";
 import https from "node:https";
 import { writeFileSync } from "node:fs";
-import { availableTiers, shouldUseExactModel } from "./lib/config.mjs";
 import { askJev } from "./lib/router.mjs";
-import { decide } from "./lib/policy.mjs";
+import { routeTurn } from "./lib/route-turn.mjs";
 import { log } from "./lib/log.mjs";
-import { writeDecision, writeStatus } from "./lib/status.mjs";
+import { writeStatus } from "./lib/status.mjs";
 import { validateAdapter } from "./adapters/index.mjs";
 
 const debug = (line) => process.env.JEV_DEBUG && log(line);
@@ -82,62 +81,39 @@ export async function genericProxy({
           const explaining = prompt?.includes("<jev-explain>") || prompt?.includes("$jev-explain");
 
           if (prompt && !explaining) {
-            // Tiers the operator has disabled are not offered to Jev at all, so it cannot
-            // spend a choice on a model the policy ladder would only have to clamp away.
-            const models = (adapter.getModels?.(catalog) ?? []).filter((m) =>
-              availableTiers().includes(m.tier),
-            );
-            const available = [...new Set(models.map((m) => m.tier))];
+            const models = adapter.getModels?.(catalog) ?? [];
             const currentModel = state.model ?? adapter.getDefaultModel?.(current);
             const contextTokens = Math.round(JSON.stringify(body.messages ?? body.input ?? "").length / 4);
-
-            const jev = await route({
-              prompt,
-              current: currentModel,
-              contextTokens,
-              models,
-              contextWindow: adapter.contextWindow,
-            });
-
-            const chosen = models.find((m) => m.id === jev?.choice);
-            const tierAnswer = jev && { ...jev, choice: chosen?.tier };
-            const decision = decide({
-              prompt,
-              jev: tierAnswer,
-              current,
-              available,
-              contextTokens,
-            });
-
-            const tier = decision.tier;
-            const model =
-              shouldUseExactModel(decision.reason, chosen?.tier, tier)
-                ? chosen.id
-                : tier === current
-                  ? currentModel
-                  : adapter.getDefaultModel?.(tier);
-
-            state.tier = tier;
-            state.model = model;
-
-            routing = {
-              prompt,
-              model,
-              confidence: jev?.confidence ?? null,
-              metrics: jev?.metrics ?? null,
-              reason: decision.reason,
-              jev: jev ? { request: jev.request, response: jev.response } : null,
-              at: Date.now(),
-            };
-
             const statusKey =
               typeof adapter.statusId === "function"
                 ? adapter.statusId(body, key)
                 : adapter.statusId || "";
-            writeDecision(statusKey, { tier, ...routing });
+            let jev;
+            const decision = await routeTurn({
+              prompt,
+              current,
+              currentModel,
+              models,
+              contextTokens,
+              contextWindow: adapter.contextWindow,
+              statusId: statusKey,
+              getDefaultModel: (tier) => adapter.getDefaultModel?.(tier),
+              route: async (input) => (jev = await route(input)),
+            });
+            state.tier = decision.tier;
+            state.model = decision.model;
+            routing = {
+              prompt,
+              model: decision.model,
+              confidence: decision.confidence,
+              metrics: decision.metrics,
+              reason: decision.reason,
+              jev: decision.jev,
+              at: decision.at,
+            };
             debug(
               `${key} ${jev ? `${jev.ms}ms p=${jev.confidence.toFixed(2)}` : "no-jev"} ` +
-                `${current} -> ${tier} (${decision.reason}) ctx~${contextTokens} | ${prompt.slice(0, 60)}`,
+                `${current} -> ${decision.tier} (${decision.reason}) ctx~${contextTokens} | ${prompt.slice(0, 60)}`,
             );
 
           } else if (prompt) {
