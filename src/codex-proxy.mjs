@@ -262,7 +262,8 @@ export async function startCodexProxy({
 
   return genericProxy({
     adapter,
-    upstreamURL: chatgptBaseURL,
+    upstreamURL: (req) => upstreamFor(req.headers, req.url, chatgptBaseURL, apiBaseURL),
     route,
+    catalog: models,
   });
 }

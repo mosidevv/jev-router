@@ -22,13 +22,16 @@ const debug = (line) => process.env.JEV_DEBUG && log(line);
  *   - isRoutingRequest(req, body) → boolean: Is this a turn we should route?
  *   - conversationKey(body) → string: Stable identifier for deduping the conversation.
  *   - newTurnPrompt(body) → string | null: The user's prompt, or null for tool continuations.
+ *   - normalizeRequest(body) → void (optional): Normalize every parsed request body.
  *   - getModels(catalog) → {id, tier, description}[]: Available models for this harness.
  *   - applyTier(body, tier, model) → body: Mutate the request for this tier.
  *   - getDefaultModel(tier) → string: Fallback model id for a tier.
+ *   - decorateModelCatalog(catalog, catalogMap) → void (optional): Ingest/decorate a model catalog.
  *   - decorateResponse(res, response, routing) → void: Inject harness-specific feedback.
- *   - upstreamURL (static): where to proxy to (e.g. api.anthropic.com, chatgpt.com).
  *   - contextWindow: tokens in the harness's context (200000 for Anthropic, etc).
- *   - statusId (optional): If not "", pass this to writeStatus/writeDecision instead of session.
+ *   - statusId (optional): A fixed id or (body, conversationKey) → id for status writes.
+ *
+ * upstreamURL may be a fixed string or a (req) → string resolver.
  *
  * Adapters Claude Code and Codex both export their adapter structure from their own files.
  */
@@ -36,13 +39,12 @@ export async function genericProxy({
   adapter,
   upstreamURL,
   route = askJev,
+  catalog = new Map(),
 } = {}) {
   if (!adapter) throw new Error("adapter is required");
 
   // Tier routed for each conversation's turn in flight, reused by its follow-ups.
   const conversations = new Map();
-  const catalog = new Map();
-
   const stateFor = (key) => {
     let s = conversations.get(key);
     if (!s) {
@@ -69,6 +71,8 @@ export async function genericProxy({
           writeFileSync(`${process.env.JEV_DUMP}.${Date.now()}.json`, JSON.stringify(body, null, 2));
         }
 
+        adapter.normalizeRequest?.(body);
+
         if (adapter.isRoutingRequest?.(req, body)) {
           const key = adapter.conversationKey?.(body);
           const state = stateFor(key);
@@ -77,10 +81,12 @@ export async function genericProxy({
           const explaining = prompt?.includes("<jev-explain>") || prompt?.includes("$jev-explain");
 
           if (prompt && !explaining) {
-            const models = adapter.getModels?.(catalog);
-            const available = [...new Set(models.map((m) => m.tier))].filter((t) =>
-              availableTiers().includes(t),
+            // Tiers the operator has disabled are not offered to Jev at all, so it cannot
+            // spend a choice on a model the policy ladder would only have to clamp away.
+            const models = (adapter.getModels?.(catalog) ?? []).filter((m) =>
+              availableTiers().includes(m.tier),
             );
+            const available = [...new Set(models.map((m) => m.tier))];
             const currentModel = state.model ?? adapter.getDefaultModel?.(current);
             const contextTokens = Math.round(JSON.stringify(body.messages ?? body.input ?? "").length / 4);
 
@@ -123,24 +129,37 @@ export async function genericProxy({
               at: Date.now(),
             };
 
-            const statusKey = adapter.statusId || "";
+            const statusKey =
+              typeof adapter.statusId === "function"
+                ? adapter.statusId(body, key)
+                : adapter.statusId || "";
             writeDecision(statusKey, { tier, ...routing });
             debug(
               `${key} ${jev ? `${jev.ms}ms p=${jev.confidence.toFixed(2)}` : "no-jev"} ` +
                 `${current} -> ${tier} (${decision.reason}) ctx~${contextTokens} | ${prompt.slice(0, 60)}`,
             );
 
-            // Apply tier to the request body.
-            adapter.applyTier?.(body, tier, model);
           } else if (prompt) {
             // Explaining request — skip routing but mark as manual if it's a real turn.
-            const statusKey = adapter.statusId || "";
+            const statusKey =
+              typeof adapter.statusId === "function"
+                ? adapter.statusId(body, key)
+                : adapter.statusId || "";
             writeStatus(statusKey, { manual: true, at: Date.now() });
           }
+
+          // The sentinel is not a real model, so every routed request must be rewritten.
+          const tier = state.tier ?? current;
+          const model = state.model ?? adapter.getDefaultModel?.(tier);
+          adapter.applyTier?.(body, tier, model);
         } else {
           // Not a routing request — check if it's an explicit model choice (manual).
           if (adapter.isManualChoice?.(req, body)) {
-            const statusKey = adapter.statusId || "";
+            const key = adapter.conversationKey?.(body);
+            const statusKey =
+              typeof adapter.statusId === "function"
+                ? adapter.statusId(body, key)
+                : adapter.statusId || "";
             writeStatus(statusKey, { manual: true, at: Date.now() });
           }
         }
@@ -151,10 +170,14 @@ export async function genericProxy({
       }
 
       // Proxy the request upstream.
-      const target = new URL(upstreamURL);
+      const resolvedUpstreamURL =
+        typeof upstreamURL === "function" ? upstreamURL(req) : upstreamURL;
+      const target = new URL(resolvedUpstreamURL);
       const transport = target.protocol === "http:" ? http : https;
       const headers = { ...req.headers, host: target.host };
       delete headers["content-length"];
+      const isModels = req.method === "GET" && /\/models(?:\?|$)/.test(req.url ?? "");
+      if (isModels) delete headers["accept-encoding"];
 
       const upstream = transport.request(
         {
@@ -166,16 +189,15 @@ export async function genericProxy({
         },
         (response) => {
           // Special handling for model catalog endpoints.
-          const isModels = req.method === "GET" && /\/models(?:\?|$)/.test(req.url ?? "");
           if (isModels && adapter.decorateModelCatalog) {
             const chunks = [];
             response.on("data", (chunk) => chunks.push(chunk));
             response.on("end", () => {
               try {
                 const data = Buffer.concat(chunks);
-                const catalog = JSON.parse(data.toString());
-                adapter.decorateModelCatalog?.(catalog);
-                const newData = Buffer.from(JSON.stringify(catalog));
+                const modelCatalog = JSON.parse(data.toString());
+                adapter.decorateModelCatalog?.(modelCatalog, catalog);
+                const newData = Buffer.from(JSON.stringify(modelCatalog));
                 const newHeaders = { ...response.headers };
                 delete newHeaders["content-length"];
                 res.writeHead(response.statusCode, newHeaders);

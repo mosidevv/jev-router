@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isAuto } from "./lib/config.mjs";
-import { tierOf, idOf, tierSpec, CONTEXT_WINDOW_TOKENS } from "./lib/tiers/claude.mjs";
+import { TIERS, tierOf, idOf, tierSpec, CONTEXT_WINDOW_TOKENS } from "./lib/tiers/claude.mjs";
 import { genericProxy } from "./generic-proxy.mjs";
 
 const ANTHROPIC_BASE_URL = "https://api.anthropic.com";
@@ -90,11 +90,7 @@ export function claudeModels(catalog = []) {
     }));
   return models.length
     ? models
-    : [
-        { id: "claude-opus-4-1", tier: "opus", description: "claude-opus-4-1" },
-        { id: "claude-sonnet-4-20250514", tier: "sonnet", description: "claude-sonnet-4-20250514" },
-        { id: "claude-haiku-4-5-20251001", tier: "haiku", description: "claude-haiku-4-5-20251001" },
-      ];
+    : TIERS.map((tier) => ({ id: tier.id, tier: tier.name, description: tier.id }));
 }
 
 /**
@@ -138,44 +134,63 @@ export function conversationKey(body) {
  * - applyTier: Mutate request for the chosen tier
  * - decorateResponse: Pass through (Claude uses files, not SSE)
  */
-const claudeAdapter = {
-  contextWindow: CONTEXT_WINDOW_TOKENS,
-  upstreamURL: ANTHROPIC_BASE_URL,
+function createClaudeAdapter(catalogMap) {
+  return {
+    contextWindow: CONTEXT_WINDOW_TOKENS,
 
-  isRoutingRequest(req, body) {
-    return /^\/v1\/messages/.test(req.url ?? "") && isAuto(body.model);
-  },
+    statusId(body, key) {
+      return sessionOf(body) || key;
+    },
 
-  isManualChoice(req, body) {
-    return /^\/v1\/messages/.test(req.url ?? "") && !isAuto(body.model) && Array.isArray(body.tools);
-  },
+    normalizeRequest(body) {
+      body.tools?.forEach((t) => sanitizeSchema(t.input_schema));
+    },
 
-  conversationKey(body) {
-    return conversationKey(body);
-  },
+    isRoutingRequest(req, body) {
+      return /^\/v1\/messages/.test(req.url ?? "") && isAuto(body.model);
+    },
 
-  newTurnPrompt(body) {
-    return newTurnPrompt(body);
-  },
+    isManualChoice(req, body) {
+      return /^\/v1\/messages/.test(req.url ?? "") && !isAuto(body.model) && Array.isArray(body.tools);
+    },
 
-  getModels(catalog) {
-    return claudeModels([...catalog.values()]);
-  },
+    conversationKey(body) {
+      return conversationKey(body);
+    },
 
-  getDefaultModel(tier) {
-    return idOf(tier);
-  },
+    newTurnPrompt(body) {
+      return newTurnPrompt(body);
+    },
 
-  applyTier(body, tier, model) {
-    body.tools?.forEach((t) => sanitizeSchema(t.input_schema));
-    applyTier(body, tier, model);
-  },
+    getModels(catalog) {
+      return claudeModels([...catalog.values()]);
+    },
 
-  decorateResponse(res, response, routing) {
-    response.pipe(res);
-  },
-};
+    getDefaultModel(tier) {
+      return idOf(tier);
+    },
+
+    applyTier(body, tier, model) {
+      applyTier(body, tier, model);
+    },
+
+    decorateModelCatalog(modelCatalog, catalog = catalogMap) {
+      for (const model of modelCatalog.data ?? []) {
+        if (tierOf(model?.id)) catalog.set(model.id, model);
+      }
+    },
+
+    decorateResponse(res, response, routing) {
+      // Claude Code reads the routing decision from the status file, not the stream, so the
+      // response passes through untouched — but the upstream status and headers must survive.
+      res.writeHead(response.statusCode, response.headers);
+      response.pipe(res);
+    },
+  };
+}
 
 export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route } = {}) {
-  return genericProxy({ adapter: claudeAdapter, upstreamURL, route });
+  const catalog = new Map();
+  const adapter = createClaudeAdapter(catalog);
+  return genericProxy({ adapter, upstreamURL, route, catalog });
 }
