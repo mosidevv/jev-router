@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   sanitizeSchema,
   newTurnPrompt,
@@ -9,23 +12,79 @@ import {
   conversationKey,
   sessionOf,
   startProxy,
-} from "../src/proxy.mjs";
+} from "../../src/proxy.mjs";
+import { tierOf } from "../../src/lib/tiers/claude.mjs";
+// The integration test below reads what the proxy wrote, so it needs the default store.
+// Store behavior itself is covered in status.test.mjs against an isolated directory.
+import { readStatus } from "../../src/lib/status.mjs";
+import { readSavedModel, restoreSavedModel } from "../../src/settings.mjs";
+import { runAdapterConformance } from "./conformance.mjs";
 
-test("only the sentinel model is routed", () => {
-  assert.equal(isAuto("jev-router"), true);
-  assert.equal(isAuto("claude-opus-4-6"), false, "a model the user picked is theirs");
-  assert.equal(isAuto("claude-haiku-4-5-20251001"), false, "internal Haiku calls pass through");
-  assert.equal(isAuto(undefined), false);
+const claudeMetadata = (statusId) => ({
+  user_id: JSON.stringify({ session_id: statusId }),
+});
+const claudeTools = [{ name: "Bash", input_schema: { type: "object" } }];
+
+runAdapterConformance({
+  name: "Claude",
+  startProxy: ({ upstreamURL, route }) => startProxy({ upstreamURL, route }),
+  routingPath: "/v1/messages",
+  catalogPath: "/v1/models?limit=100",
+  sentinelModel: "jev-router",
+  resolvedModel: "claude-opus-4-8-conformance",
+  resolvedTier: "opus",
+  manualModel: "claude-haiku-4-5-20251001",
+  catalogResponse: {
+    data: [
+      { id: "claude-sonnet-5-conformance", display_name: "Claude Sonnet Conformance" },
+      { id: "claude-opus-4-8-conformance", display_name: "Claude Opus Conformance" },
+    ],
+  },
+  expectedCatalogModelIds: [
+    "claude-sonnet-5-conformance",
+    "claude-opus-4-8-conformance",
+  ],
+  makeRoutingRequest: ({ model, prompt, statusId }) => ({
+    model,
+    metadata: claudeMetadata(statusId),
+    tools: claudeTools,
+    messages: [{ role: "user", content: prompt }],
+  }),
+  makeToolContinuation: ({ model, prompt, statusId }) => ({
+    model,
+    metadata: claudeMetadata(statusId),
+    tools: claudeTools,
+    messages: [
+      { role: "user", content: prompt },
+      { role: "assistant", content: [{ type: "tool_use", id: "tool-1", name: "Bash", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-1", content: "done" }] },
+    ],
+  }),
+  makeExplainRequest: ({ model, prompt, statusId }) => ({
+    model,
+    metadata: claudeMetadata(statusId),
+    tools: claudeTools,
+    messages: [
+      { role: "user", content: prompt },
+      { role: "assistant", content: "done" },
+      { role: "user", content: "$jev-explain" },
+    ],
+  }),
+  makeManualRequest: ({ model, statusId }) => ({
+    model,
+    metadata: claudeMetadata(statusId),
+    tools: claudeTools,
+    messages: [{ role: "user", content: "manual model request" }],
+  }),
+  authHeaders: {
+    "x-api-key": "claude-conformance-key",
+    "anthropic-version": "2023-06-01",
+  },
 });
 
 test("the sentinel is not mistaken for a real tier", () => {
   assert.equal(tierOf("jev-router"), null);
 });
-import { isAuto } from "../src/lib/config.mjs";
-import { tierOf } from "../src/lib/tiers/claude.mjs";
-// The integration test below reads what the proxy wrote, so it needs the default store.
-// Store behavior itself is covered in status.test.mjs against an isolated directory.
-import { readStatus } from "../src/lib/status.mjs";
 
 test("reads the session id out of Claude Code's metadata", () => {
   const sid = "11111111-2222-4333-8444-555555555555";
@@ -322,4 +381,46 @@ test("the same opening text in two sessions gets two keys", () => {
 test("the key survives metadata that is not JSON", () => {
   const body = { metadata: { user_id: "not-json" }, messages: [{ role: "user", content: "hi" }] };
   assert.doesNotThrow(() => conversationKey(body));
+});
+
+test("Claude skill pre-approves its read-only explanation command", () => {
+  const skill = readFileSync(new URL("../../.claude/skills/jev-explain/SKILL.md", import.meta.url), "utf8");
+  assert.match(skill, /^allowed-tools: Bash\(node \*\)$/m);
+});
+
+const fileWith = (settings) => {
+  const file = join(mkdtempSync(join(tmpdir(), "jev-settings-")), "settings.json");
+  writeFileSync(file, JSON.stringify(settings, null, 2));
+  return file;
+};
+const modelIn = (file) => JSON.parse(readFileSync(file, "utf8")).model;
+
+test("reads the saved model, ignoring a leftover sentinel", () => {
+  assert.equal(readSavedModel(fileWith({ model: "opus" })), "opus");
+  assert.equal(readSavedModel(fileWith({ model: "jev-router" })), undefined);
+  assert.equal(readSavedModel(fileWith({})), undefined);
+  assert.equal(readSavedModel(join(tmpdir(), "does-not-exist.json")), undefined);
+});
+
+test("restores the previous model when the sentinel was saved", () => {
+  const file = fileWith({ model: "jev-router", permissions: { deny: ["Bash(rm*)"] } });
+  assert.equal(restoreSavedModel("opus", file), true);
+  assert.equal(modelIn(file), "opus");
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).permissions, { deny: ["Bash(rm*)"] });
+});
+
+test("removes the sentinel when there was no previous model", () => {
+  const file = fileWith({ model: "jev-router" });
+  assert.equal(restoreSavedModel(undefined, file), true);
+  assert.equal(modelIn(file), undefined);
+});
+
+test("leaves a real model the user chose during the session alone", () => {
+  const file = fileWith({ model: "claude-opus-4-6" });
+  assert.equal(restoreSavedModel("sonnet", file), false);
+  assert.equal(modelIn(file), "claude-opus-4-6");
+});
+
+test("a missing or unreadable settings file is not an error", () => {
+  assert.equal(restoreSavedModel("opus", join(tmpdir(), "nope", "settings.json")), false);
 });

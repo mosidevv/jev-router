@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createStatusStore, DEFAULT_STATUS_DIR, STATUS_DIR } from "../src/lib/status.mjs";
+import { createStatusStore, DEFAULT_STATUS_DIR, STATUS_DIR } from "../../src/lib/status.mjs";
 
 // Each test gets a store of its own, so nothing here touches the directory that live
 // sessions and `jev-explain` read.

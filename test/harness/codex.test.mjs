@@ -14,9 +14,82 @@ import {
   jevDecisionEvents,
   startCodexProxy,
   upstreamFor,
-} from "../src/codex-proxy.mjs";
-import { codexArgs, installCodexSkill } from "../src/codex-cli.mjs";
-import { readStatus } from "../src/lib/status.mjs";
+} from "../../src/codex-proxy.mjs";
+import { codexArgs, installCodexSkill } from "../../src/codex-cli.mjs";
+import { readStatus } from "../../src/lib/status.mjs";
+import { runAdapterConformance } from "./conformance.mjs";
+
+const codexTools = { type: "additional_tools", role: "developer", tools: [{}] };
+
+runAdapterConformance({
+  name: "Codex",
+  startProxy: ({ upstreamURL, route, statusId }) => startCodexProxy({
+    chatgptBaseURL: `${upstreamURL}/backend-api/codex`,
+    apiBaseURL: `${upstreamURL}/v1`,
+    route,
+    statusId,
+  }),
+  routingPath: "/responses",
+  catalogPath: "/models?client_version=conformance",
+  sentinelModel: "jev-router",
+  resolvedModel: "gpt-5.6-sol-conformance",
+  resolvedTier: "opus",
+  manualModel: "gpt-5.6-luna",
+  catalogResponse: {
+    models: [
+      {
+        slug: "gpt-5.6-terra-conformance",
+        display_name: "GPT Terra Conformance",
+        visibility: "list",
+        supported_in_api: true,
+      },
+      {
+        slug: "gpt-5.6-sol-conformance",
+        display_name: "GPT Sol Conformance",
+        visibility: "list",
+        supported_in_api: true,
+      },
+    ],
+  },
+  expectedCatalogModelIds: [
+    "gpt-5.6-terra-conformance",
+    "gpt-5.6-sol-conformance",
+  ],
+  makeRoutingRequest: ({ model, prompt, statusId }) => ({
+    model,
+    prompt_cache_key: statusId,
+    input: [codexTools, { role: "user", content: [{ type: "input_text", text: prompt }] }],
+  }),
+  makeToolContinuation: ({ model, prompt, statusId }) => ({
+    model,
+    prompt_cache_key: statusId,
+    input: [
+      codexTools,
+      { role: "user", content: [{ type: "input_text", text: prompt }] },
+      { type: "function_call", call_id: "call-1", name: "shell", arguments: "{}" },
+      { type: "function_call_output", call_id: "call-1", output: "done" },
+    ],
+  }),
+  makeExplainRequest: ({ model, prompt, statusId }) => ({
+    model,
+    prompt_cache_key: statusId,
+    input: [
+      codexTools,
+      { role: "user", content: [{ type: "input_text", text: prompt }] },
+      { role: "assistant", content: [{ type: "output_text", text: "done" }] },
+      { role: "user", content: [{ type: "input_text", text: "$jev-explain" }] },
+    ],
+  }),
+  makeManualRequest: ({ model, statusId }) => ({
+    model,
+    prompt_cache_key: statusId,
+    input: [codexTools, { role: "user", content: "manual model request" }],
+  }),
+  authHeaders: {
+    authorization: "Bearer codex-conformance-token",
+    "chatgpt-account-id": "codex-conformance-account",
+  },
+});
 
 test("Codex uses a temporary authenticated Jev provider", () => {
   const args = codexArgs("http://127.0.0.1:1234", ["--sandbox", "read-only"]);
