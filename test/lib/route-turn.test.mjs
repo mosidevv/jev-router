@@ -211,3 +211,23 @@ test("headroom keeps a request just under the window off that model", async () =
 
   assert.equal(decision.tier, "sonnet");
 });
+
+test("when no model can hold the request, the turn stays where it was", async () => {
+  const decision = await routeTurn({
+    prompt: "huge",
+    current: "sonnet",
+    currentModel: "test-sonnet-v1",
+    models: [
+      { id: "test-haiku-v1", tier: "haiku", maxInputTokens: 200_000 },
+      { id: "test-sonnet-v1", tier: "sonnet", maxInputTokens: 200_000 },
+    ],
+    contextTokens: 300_000,
+    requestTokens: 300_000,
+    contextWindow: 200_000,
+    getDefaultModel: (tier) => defaults[tier],
+    route: async ({ models }) => (models.length ? { choice: models[0].id, confidence: 1 } : null),
+  });
+
+  assert.equal(decision.tier, "sonnet");
+  assert.equal(decision.model, "test-sonnet-v1");
+});

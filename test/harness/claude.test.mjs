@@ -10,6 +10,7 @@ import {
   applyTier,
   claudeModels,
   conversationKey,
+  requestTokensOf,
   sessionOf,
   startProxy,
 } from "../../src/proxy.mjs";
@@ -547,4 +548,40 @@ test("the catalog's max_input_tokens decides which models fit", async (t) => {
   });
 
   assert.equal(seen[0].model, "claude-opus-big");
+});
+
+test("a turn that outgrows its model mid-tool-loop moves to one that fits", async (t) => {
+  const { seen, upstreamURL } = await claudeUpstream(t, []);
+  const { port, close } = await startProxy({
+    upstreamURL,
+    route: async () => ({ choice: "claude-haiku-4-5-20251001", confidence: 1, ms: 1 }),
+  });
+  t.after(close);
+  const metadata = claudeMetadata(`outgrow-${process.pid}`);
+  const opening = { role: "user", content: "read the log" };
+
+  await postMessages(port, { model: "jev-router", metadata, tools: claudeTools, messages: [opening] });
+  assert.ok(seen[0].model.includes("haiku"), "a small turn may go to Haiku");
+
+  // The tool result alone is ~220k tokens, past Haiku's window.
+  await postMessages(port, {
+    model: "jev-router",
+    metadata,
+    tools: claudeTools,
+    messages: [
+      opening,
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "x".repeat(880_000) }] },
+    ],
+  });
+  assert.ok(!seen[1].model.includes("haiku"), `continuation forwarded ${seen[1].model}`);
+});
+
+test("request estimates count images at their documented cap, not their base64 length", () => {
+  const image = { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(700_000) } };
+  const tokens = requestTokensOf({ messages: [{ role: "user", content: [image, { type: "text", text: "what is this?" }] }] });
+  assert.ok(tokens > 4784 && tokens < 5000, `estimated ${tokens}`);
+
+  const signed = { type: "thinking", thinking: "short", signature: "S".repeat(400_000) };
+  assert.ok(requestTokensOf({ messages: [{ role: "assistant", content: [signed] }] }) < 100);
 });

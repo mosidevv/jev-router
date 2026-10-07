@@ -1,7 +1,26 @@
-import { availableTiers, shouldUseExactModel, THRESHOLDS } from "./config.mjs";
+import { availableTiers, shouldUseExactModel, THRESHOLDS, TIER_NAMES } from "./config.mjs";
 import { decide } from "./policy.mjs";
 import { askJev } from "./router.mjs";
 import { defaultStore } from "./status.mjs";
+
+/** Whether `model` can take a request of `requestTokens`, with headroom for the estimate. */
+export const fitsWindow = (model, requestTokens) =>
+  !model?.maxInputTokens || requestTokens <= model.maxInputTokens * THRESHOLDS.contextHeadroom;
+
+/**
+ * The cheapest model at or above `tier` whose window holds the request, for a turn already in
+ * flight that has outgrown its model (a tool result can push it past the window). Returns null
+ * when the current model still fits, or when nothing does and there is nowhere better to go.
+ */
+export function upgradeToFit({ models, tier, model, requestTokens }) {
+  if (fitsWindow(models.find((m) => m.id === model), requestTokens)) return null;
+  const from = TIER_NAMES.indexOf(tier);
+  const usable = models.filter(
+    (m) => availableTiers().includes(m.tier) && TIER_NAMES.indexOf(m.tier) >= from && fitsWindow(m, requestTokens),
+  );
+  usable.sort((a, b) => TIER_NAMES.indexOf(a.tier) - TIER_NAMES.indexOf(b.tier));
+  return usable[0] ? { tier: usable[0].tier, model: usable[0].id } : null;
+}
 
 /**
  * Route one new user turn without assuming any harness or wire protocol.
@@ -41,8 +60,7 @@ export async function routeTurn({
 }) {
   // Disabled tiers are not offered to Jev, matching the proxy's historical behavior.
   // So are models too small for the request: the API would reject the turn outright.
-  const fits = (model) =>
-    !model?.maxInputTokens || requestTokens <= model.maxInputTokens * THRESHOLDS.contextHeadroom;
+  const fits = (model) => fitsWindow(model, requestTokens);
   const fitsId = (id) => fits(models.find((model) => model.id === id));
   const routedModels = models.filter((model) => availableTiers().includes(model.tier) && fits(model));
   const available = [...new Set(routedModels.map((model) => model.tier))];

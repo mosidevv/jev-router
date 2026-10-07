@@ -2,7 +2,7 @@ import http from "node:http";
 import https from "node:https";
 import { writeFileSync } from "node:fs";
 import { askJev } from "./lib/router.mjs";
-import { routeTurn } from "./lib/route-turn.mjs";
+import { routeTurn, upgradeToFit } from "./lib/route-turn.mjs";
 import { log } from "./lib/log.mjs";
 import { defaultStore } from "./lib/status.mjs";
 import { validateAdapter } from "./adapters/index.mjs";
@@ -132,6 +132,22 @@ export async function genericProxy({
 
           }
           // An explain turn writes nothing: the decision it explains must still be on disk.
+
+          // A turn in flight can outgrow its model: one large tool result is enough. Move it
+          // to the cheapest model that fits rather than let the API reject it as too long.
+          if (!prompt && state.model && adapter.requestTokens) {
+            const moved = upgradeToFit({
+              models: adapter.getModels?.(catalog) ?? [],
+              tier: state.tier ?? current,
+              model: state.model,
+              requestTokens: adapter.requestTokens(body),
+            });
+            if (moved) {
+              debug(`${key} outgrew ${state.model}; continuing on ${moved.model}`);
+              state.tier = moved.tier;
+              state.model = moved.model;
+            }
+          }
 
           // The sentinel is not a real model, so every routed request must be rewritten.
           const tier = state.tier ?? current;

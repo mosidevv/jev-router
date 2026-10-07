@@ -94,6 +94,28 @@ export function claudeModels(catalog = []) {
     : TIERS.map((tier) => ({ id: tier.id, tier: tier.name, description: tier.id, maxInputTokens: tier.maxInputTokens }));
 }
 
+// Anthropic documents an image's cost as at most 4784 visual tokens (the high-resolution
+// tier's cap); its base64 length says nothing about that, so each counts at the cap instead.
+const IMAGE_TOKENS = 4784;
+
+/**
+ * Estimated input tokens for a whole Messages request: system prompt, tool definitions and
+ * conversation, at characters/4. Base64 images count at their documented cap, and thinking
+ * signatures, which are opaque verification data rather than text, are left out.
+ */
+export function requestTokensOf(body) {
+  let images = 0;
+  const text = JSON.stringify([body.system ?? "", body.tools ?? [], body.messages ?? ""], (key, value) => {
+    if (key === "signature" && typeof value === "string") return undefined;
+    if (value?.type === "image" && value.source?.type === "base64") {
+      images++;
+      return undefined;
+    }
+    return value;
+  });
+  return Math.round(text.length / 4) + images * IMAGE_TOKENS;
+}
+
 /**
  * Session id Claude Code embeds in request metadata, or "" when it isn't present.
  */
@@ -184,7 +206,7 @@ function createClaudeAdapter(catalogMap) {
     // Claude Code's system prompt and tool definitions can be most of a request: with many
     // MCP servers they alone can exceed Haiku's window.
     requestTokens(body) {
-      return Math.round(JSON.stringify([body.system ?? "", body.tools ?? [], body.messages ?? ""]).length / 4);
+      return requestTokensOf(body);
     },
 
     upstreamErrorBody(message) {
