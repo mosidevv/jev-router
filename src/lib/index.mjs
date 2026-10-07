@@ -7,10 +7,13 @@
  * it afterwards. Wire protocol, model-picker injection, and decision surfacing all belong to
  * a harness adapter outside this directory.
  *
- * The two harnesses that exist today still keep that adapter code at the top of `src/`:
- * `proxy.mjs` and `settings.mjs` for Claude Code, `codex-proxy.mjs` and `codex-cli.mjs` for
- * Codex. Collecting them under `src/adapters/` behind a named contract is follow-up work;
- * whichever shape it lands in, everything a harness routes with comes from here.
+ * The adapter contract is public in `src/adapters/` (`genericProxy`, `defineAdapter`, and
+ * the conformance suite; see docs/adapters.md). The two bundled harnesses implement it at
+ * the top of `src/`: `proxy.mjs` and `settings.mjs` for Claude Code, `codex-proxy.mjs` and
+ * `codex-cli.mjs` for Codex. Everything a harness routes with comes from here.
+ *
+ * This file is internal. The package exports map exposes only `src/adapters/`, so outside
+ * consumers reach the core through that entry point (`routeTurn` is re-exported there).
  */
 
 // Tier table, thresholds, the Jev question rubric, and the sentinel model id.

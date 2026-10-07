@@ -17,7 +17,7 @@ The native caller must update its own current tier/model after each decision, es
 
 ## The request pipeline
 
-`genericProxy({ adapter, upstreamURL, route, catalog })` validates the adapter once, starts a loopback HTTP server, and then handles each request in this order:
+`genericProxy({ adapter, upstreamURL, route, catalog, store })` validates the adapter once, starts a loopback HTTP server, and then handles each request in this order:
 
 1. A `HEAD` probe receives `200` immediately. No adapter hook runs.
 2. The proxy buffers the request body and tries to parse JSON. If parsing succeeds, `normalizeRequest(body)` runs first when supplied.
@@ -25,13 +25,13 @@ The native caller must update its own current tier/model after each decision, es
 4. For a routed request, `conversationKey(body)` finds its routing state and `newTurnPrompt(body)` classifies it:
    - A new user prompt calls `getModels(catalog)` and `getDefaultModel(currentTier)`, then passes those values to `routeTurn`. The chosen tier and exact model are saved. `statusId` selects the status record, then `applyTier(body, tier, model)` must replace the sentinel before forwarding.
    - A tool continuation returns `null` from `newTurnPrompt`. It does not call the router again. `getDefaultModel(tier)` may supply a cold-start model, and `applyTier` rewrites the request with the conversation's saved model.
-   - A reserved explanation prompt is treated as a manual/status request rather than sent to the router. `statusId` is resolved, then `getDefaultModel` and `applyTier` still ensure that the sentinel is replaced.
+   - A reserved explanation prompt (one containing `<jev-explain>`, or starting with `$jev-explain`) is not sent to the router and writes no status, so the decision it explains stays on disk. `getDefaultModel` and `applyTier` still ensure that the sentinel is replaced.
 5. For a non-routing request, `isManualChoice(req, body)` runs when supplied. If it returns true, `conversationKey` and `statusId` identify the manual-status record. The chosen model and body otherwise pass through unchanged.
-6. The parsed body is serialized and proxied to `upstreamURL`, which may be a URL string or `(req) => url`. Request headers are retained except that `host` is changed and `content-length` is recalculated.
+6. The parsed body is re-serialized and proxied to `upstreamURL`, which may be a URL string or `(req) => url`. Request headers are retained except that `host` is changed and `content-length` is recalculated.
 7. For a `GET` whose path ends in `/models` (optionally followed by a query), the upstream JSON response is buffered. If supplied, `decorateModelCatalog(modelCatalog, catalog)` can add a picker entry and populate the shared catalog before the JSON is returned to the client.
 8. After a newly routed turn, a successful 2xx upstream response is handed to `decorateResponse(res, response, routing)` when supplied. That hook owns forwarding and ending the response. Every other response is piped through unchanged.
 
-Malformed or empty JSON bodies skip the body hooks and are forwarded unchanged. Set `JEV_DEBUG=1` while developing to see parse, decoration, upstream, and routing failures that the proxy deliberately keeps away from a coding CLI's terminal UI.
+Malformed or empty JSON bodies skip the body hooks and are forwarded unchanged. If the upstream cannot be reached, the client receives a `502` whose JSON body comes from `upstreamErrorBody(message)` when supplied, else `{ error: { message, type: "proxy_error" } }`. Set `JEV_DEBUG=1` while developing to see parse, decoration, upstream, and routing failures that the proxy deliberately keeps away from a coding CLI's terminal UI.
 
 The resulting call pattern is:
 
@@ -39,6 +39,7 @@ The resulting call pattern is:
 | --- | --- |
 | New routed user turn | `normalizeRequest`, `isRoutingRequest`, `conversationKey`, `newTurnPrompt`, `getModels`, `getDefaultModel`, `statusId`, `applyTier`, then possibly `decorateResponse` |
 | Routed tool continuation | `normalizeRequest`, `isRoutingRequest`, `conversationKey`, `newTurnPrompt`, `getDefaultModel`, `applyTier` |
+| Routed explanation turn | `normalizeRequest`, `isRoutingRequest`, `conversationKey`, `newTurnPrompt`, `getDefaultModel`, `applyTier` |
 | Manual model choice | `normalizeRequest`, `isRoutingRequest`, `isManualChoice`, then `conversationKey` and `statusId` if it is manual |
 | Model-catalog fetch | `decorateModelCatalog` on the upstream response; body hooks do not run for the usual bodyless `GET` |
 
@@ -52,16 +53,18 @@ The six required functions are the minimum needed to recognize routing requests,
 | `conversationKey` | Required: `(body) => string` | Return a stable key for all requests in one conversation and a different key for sub-agents or separate sessions. An unstable or shared key loses routing state or leaks it between conversations. |
 | `newTurnPrompt` | Required: `(body) => string \| null` | Return cleaned user text for one genuinely new turn; return `null` for tool continuations, auxiliary requests, or empty input. Returning old text routes repeatedly; returning `null` for a real turn reuses the previous/default model. |
 | `getModels` | Required: `(catalog: Map<string, object>) => Array<{ id: string, tier: "haiku" \| "sonnet" \| "opus" \| "fable", description?: string }>` | Return the exact upstream model IDs the account can use. Invalid tiers are filtered by policy; an empty or stale list prevents an informed exact-model choice. |
-| `getDefaultModel` | Required: `(tier) => string` | Map each shared tier to a real upstream model ID for cold starts and policy fallbacks. Returning the sentinel, `undefined`, or an unavailable ID makes the forwarded request invalid. |
+| `getDefaultModel` | Required: `(tier) => string` | Map each shared tier to a real upstream model ID for cold starts and policy fallbacks. Prefer the account's catalog over static IDs: a fallback runs whenever the router is unavailable or unsure, and a static ID the account lacks is rejected upstream. Returning the sentinel, `undefined`, or an unavailable ID makes the forwarded request invalid. |
 | `applyTier` | Required: `(body, tier, model) => void \| body` | Mutate `body` in place to use `model` and remove fields unsupported by that tier. The return value is ignored. Failure to mutate the body lets the sentinel reach upstream. |
-| `isManualChoice` | Optional: `(req, body) => boolean` | Identify explicit non-sentinel model selections for manual status. If omitted, manual requests still pass through but are not recorded. |
+| `isManualChoice` | Optional: `(req, body) => boolean` | Identify a real user turn on an explicit non-sentinel model, for manual status. Return false for the harness's own auxiliary calls (titles, summaries), tool continuations and explanation turns, or they overwrite the routed status. If omitted, manual requests still pass through but are not recorded. |
 | `normalizeRequest` | Optional: `(body) => void` | Mutate every successfully parsed request before classification, for example to normalize schemas. If supplied with a non-function value, startup validation fails; if omitted, the body is untouched. |
 | `decorateModelCatalog` | Optional: `(modelCatalog, catalog: Map<string, object>) => void` | Mutate the catalog response for the CLI and populate the map consumed by `getModels`. If omitted, catalog responses pass through and `getModels` must provide cold-start models itself. Throwing leaves the original catalog response intact and logs only in debug mode. |
 | `decorateResponse` | Optional: `(res, response, routing) => void` | Inject harness-native routing feedback into a 2xx response. The hook must forward status, headers, body/stream, and end `res`. If omitted, the response is piped through. A broken hook can truncate or hang successful routed responses. |
+| `contextTokens` | Optional: `(body) => number` | Estimate the conversation's context size in tokens, used by the policy's large-context guard. The default is a quarter of the JSON length of `body.messages` or `body.input`; an adapter with another body shape should supply its own. |
+| `upstreamErrorBody` | Optional: `(message) => object` | The harness's own error shape for a `502` when the upstream is unreachable, so the CLI can render it. |
 | `statusId` | Optional: `string \| (body, conversationKey) => string` | Select the status-file ID. The default is an empty string, which disables status-file writes. A function is useful when the ID is carried in each body. |
 | `contextWindow` | Required: positive finite `number` | Passed to the route function as its context-window size. A missing or wrong value makes context pressure unreliable, so startup validation rejects it. |
 
-`defineAdapter(adapter)` validates and returns the same object; it does not add defaults or change routing behavior. `validateAdapter(adapter)` does the same validation directly and also returns the same object on success. The root entry point additionally exports `AUTO_MODEL`, `TIER_NAMES`, and `isAuto` from the shared core so adapters do not duplicate the sentinel or tier vocabulary.
+`defineAdapter(adapter)` validates and returns the same object; it does not add defaults or change routing behavior. `validateAdapter(adapter)` does the same validation directly and also returns the same object on success. The root entry point additionally exports `AUTO_MODEL`, `TIER_NAMES`, and `isAuto` from the shared core so adapters do not duplicate the sentinel or tier vocabulary, and `createStatusStore` and `readStatus` for status records. Decisions go to a shared store under `$TMPDIR/jev-claude` (or `JEV_STATUS_DIR`) by default; a harness that must keep its records apart passes `store: createStatusStore({ dir })` to `genericProxy` or `routeTurn` and reads them back with `store.readStatus(id)`.
 
 ## Sentinel invariant
 
@@ -163,7 +166,7 @@ node --test echo-adapter.test.mjs
 
 Do not use `skip` to make a prospective adapter green. A skipped invariant means the shared contract is not satisfied and should be treated as an explicit design finding.
 
-The five tests verify that routed, continuation, and explanation requests never forward the sentinel; a fetched catalog supplies the exact models given to the router; routed status is filed under the harness ID; a manual model bypasses routing and passes through; and configured auth headers plus upstream status/header metadata survive the proxy.
+The eight tests verify that routed, continuation, and explanation requests never forward the sentinel; a fetched catalog supplies the exact models given to the router; routed status is filed under the harness ID; an explanation turn leaves that status untouched; with the router unavailable, a real model is forwarded (exactly `expectedFallbackModel` when you supply it, which should be a catalog model); a manual model bypasses routing, passes through, and is recorded as manual; and configured auth headers plus the upstream status, a header, and the response body survive the proxy.
 
 They deliberately do **not** verify:
 
@@ -172,8 +175,8 @@ They deliberately do **not** verify:
 - Prompt cleaning beyond the supplied fixtures, including system reminders, auxiliary calls, malformed bodies, and all tool-result forms.
 - `normalizeRequest`, unsupported-field removal in `applyTier`, context-token estimation, or whether `contextWindow` matches every model.
 - The catalog response as rendered by the real model picker; the suite checks only the exact models later passed to the route function.
-- Manual-choice status contents or explanation-status contents; it checks bypass/rewriting behavior, not the UI that reads those records.
-- Response bodies, streaming/chunk boundaries, SSE/event syntax, or routing-feedback content. It checks the upstream status and one response header.
+- The UI that reads status records; it checks only that the right record is written, kept, or marked manual.
+- Streaming/chunk boundaries, SSE/event syntax, or routing-feedback content. It checks the upstream status, one response header, and a non-streamed JSON body.
 - Headers other than those listed in `authHeaders`, request-body fidelity beyond the forwarded model, HEAD probes, upstream errors, cancellation, concurrency, or long-lived state eviction.
 - Real routing quality, latency, cost, policy thresholds, or the correctness and availability of the model IDs returned by the harness.
 
