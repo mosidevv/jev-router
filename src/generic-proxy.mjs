@@ -76,8 +76,11 @@ export async function genericProxy({
     return s;
   };
 
+  // Read once at listen time: after close(), server.address() is null, and a request still
+  // arriving on a keep-alive socket must not crash the process.
+  let port = 0;
   const server = http.createServer((req, res) => {
-    if (isForeignRequest(req.headers, server.address().port)) {
+    if (isForeignRequest(req.headers, port)) {
       debug(`refused request for host ${req.headers.host} origin ${req.headers.origin ?? "-"}`);
       res.writeHead(403, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "jev-router accepts only loopback requests", type: "forbidden" } }));
@@ -252,5 +255,6 @@ export async function genericProxy({
   });
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { port: server.address().port, close: () => server.close() };
+  port = server.address().port;
+  return { port, close: () => server.close() };
 }
