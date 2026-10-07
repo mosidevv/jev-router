@@ -4,6 +4,9 @@ export { AUTO_MODEL, TIER_NAMES, isAuto } from "../lib/config.mjs";
 // per-turn decision without an HTTP hop. The exports map blocks deep imports, so this
 // re-export is the only way a consumer of the package can reach it. See docs/adapters.md.
 export { routeTurn } from "../lib/route-turn.mjs";
+// A harness that must not share the default status directory passes its own store to
+// routeTurn or genericProxy, and reads its records back from the same store.
+export { createStatusStore, readStatus } from "../lib/status.mjs";
 
 /**
  * @typedef {"haiku" | "sonnet" | "opus" | "fable"} AdapterTier
@@ -30,6 +33,8 @@ export { routeTurn } from "../lib/route-turn.mjs";
  * @property {(body: object) => void} [normalizeRequest]
  * @property {(modelCatalog: object, catalog: Map<string, object>) => void} [decorateModelCatalog]
  * @property {(res: import("node:http").ServerResponse, response: import("node:http").IncomingMessage, routing: object) => void} [decorateResponse]
+ * @property {(body: object) => number} [contextTokens]
+ * @property {(message: string) => object} [upstreamErrorBody]
  * @property {string | ((body: object, conversationKey: string) => string)} [statusId]
  * @property {number} contextWindow
  */
@@ -48,6 +53,8 @@ const OPTIONAL_FUNCTIONS = [
   "normalizeRequest",
   "decorateModelCatalog",
   "decorateResponse",
+  "contextTokens",
+  "upstreamErrorBody",
 ];
 
 const typeOf = (value) => value === null ? "null" : Array.isArray(value) ? "array" : typeof value;

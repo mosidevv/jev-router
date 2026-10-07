@@ -23,8 +23,12 @@ const listen = (server) => new Promise((resolve) => server.listen(0, "127.0.0.1"
  *
  * Optional options:
  * - getForwardedModel(body): extracts the model from an upstream body (defaults to body.model).
+ * - expectedFallbackModel: the exact model the adapter must forward when the router is
+ *   unavailable on a cold start (the strong tier). Without it, the fallback is only checked
+ *   for being a real model id rather than the sentinel or nothing.
  * - skip: map of invariant keys to a boolean or reason string. Keys are sentinel, catalog,
- *   status, manual, and fidelity. Opt-outs are visible skipped tests, never silent omissions.
+ *   status, explain, fallback, manual, manualStatus, and fidelity. Opt-outs are visible
+ *   skipped tests, never silent omissions.
  */
 export function runAdapterConformance({
   name,
@@ -43,6 +47,7 @@ export function runAdapterConformance({
   makeManualRequest,
   authHeaders,
   getForwardedModel = (body) => body.model,
+  expectedFallbackModel,
   skip = {},
 }) {
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
@@ -117,7 +122,7 @@ export function runAdapterConformance({
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    await response.arrayBuffer();
+    response.bodyText = await response.text();
     return response;
   };
 
@@ -204,6 +209,36 @@ export function runAdapterConformance({
     assert.equal(status.prompt, prompt);
   });
 
+  define("explain", "an explanation turn leaves the recorded decision untouched", async (t) => {
+    const statusId = statusIdFor("explain");
+    const prompt = "explain conformance prompt";
+    const { baseURL } = await fixture(t, { statusId, route: async () => decision });
+
+    await loadCatalog(baseURL);
+    await request(baseURL, makeRoutingRequest({ model: sentinelModel, prompt, statusId }));
+    const before = readStatus(statusId);
+    await request(baseURL, makeExplainRequest({ model: sentinelModel, prompt, statusId }));
+
+    assert.deepEqual(readStatus(statusId), before, "the decision being explained must survive");
+  });
+
+  define("fallback", "falls back to a real model when the router is unavailable", async (t) => {
+    const statusId = statusIdFor("fallback");
+    const { baseURL, seen } = await fixture(t, { statusId, route: async () => null });
+
+    await loadCatalog(baseURL);
+    await request(baseURL, makeRoutingRequest({ model: sentinelModel, prompt: "fallback prompt", statusId }));
+
+    const turn = seen.find(({ method, url }) => method === "POST" && url.includes(routingPath));
+    const forwarded = getForwardedModel(turn.body);
+    assert.equal(typeof forwarded, "string");
+    assert.ok(forwarded, "getDefaultModel must return a model id");
+    assert.notEqual(forwarded, sentinelModel, "the sentinel never reaches upstream");
+    if (expectedFallbackModel !== undefined) {
+      assert.equal(forwarded, expectedFallbackModel, "the fallback must be a model the account's catalog lists");
+    }
+  });
+
   define("manual", "passes manual model choices through without routing", async (t) => {
     const statusId = statusIdFor("manual");
     let routeCalls = 0;
@@ -220,6 +255,15 @@ export function runAdapterConformance({
     const turn = seen.find(({ method }) => method === "POST");
     assert.equal(routeCalls, 0);
     assert.equal(getForwardedModel(turn.body), manualModel);
+  });
+
+  define("manualStatus", "records a manual model choice as manual", async (t) => {
+    const statusId = statusIdFor("manual-status");
+    const { baseURL } = await fixture(t, { statusId, route: async () => decision });
+
+    await request(baseURL, makeManualRequest({ model: manualModel, statusId }));
+
+    assert.equal(readStatus(statusId)?.manual, true, "isManualChoice must mark a real manual turn");
   });
 
   define("fidelity", "preserves auth and upstream response metadata", async (t) => {
@@ -253,5 +297,6 @@ export function runAdapterConformance({
     }
     assert.equal(response.status, 207);
     assert.equal(response.headers.get("x-conformance-upstream"), "preserved");
+    assert.equal(response.bodyText, JSON.stringify({ from: "upstream" }), "the upstream body must arrive intact");
   });
 }

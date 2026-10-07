@@ -126,12 +126,17 @@ export function conversationKey(body) {
  * Adapter for Claude Code / Anthropic API.
  *
  * Implements the adapter interface for genericProxy:
+ * - statusId: Claude Code's session id, or the conversation key for print-mode runs
+ * - normalizeRequest: Sanitize legacy MCP JSON schemas
  * - isRoutingRequest: Detect routing requests (/v1/messages with sentinel model)
+ * - isManualChoice: A tool-bearing turn on a model the user picked
  * - conversationKey: Extract stable conversation identifier
  * - newTurnPrompt: Extract user prompt text, filtering boilerplate
  * - getModels: Collect available models from the catalog
- * - getDefaultModel: Default model for a tier name
+ * - getDefaultModel: The account's catalog model for a tier, else the static id
  * - applyTier: Mutate request for the chosen tier
+ * - contextTokens, upstreamErrorBody: Anthropic message and error shapes
+ * - decorateModelCatalog: Record the account's models from /v1/models
  * - decorateResponse: Pass through (Claude uses files, not SSE)
  */
 function createClaudeAdapter(catalogMap) {
@@ -166,8 +171,17 @@ function createClaudeAdapter(catalogMap) {
       return claudeModels([...catalog.values()]);
     },
 
+    // The account's own catalog wins, so a fallback never names a model it cannot reach.
     getDefaultModel(tier) {
-      return idOf(tier);
+      return claudeModels([...catalogMap.values()]).find((model) => model.tier === tier)?.id ?? idOf(tier);
+    },
+
+    contextTokens(body) {
+      return Math.round(JSON.stringify(body.messages ?? "").length / 4);
+    },
+
+    upstreamErrorBody(message) {
+      return { type: "error", error: { message } };
     },
 
     applyTier(body, tier, model) {

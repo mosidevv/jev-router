@@ -124,3 +124,28 @@ test("routeTurn never offers the router a tier the operator has disabled", async
   assert.equal(seen.includes("fable"), false, "a disabled tier must never reach the router");
   assert.deepEqual(seen, ["haiku", "sonnet", "opus"]);
 });
+
+test("routeTurn records into an injected store, not the shared one", async (t) => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { createStatusStore } = await import("../../src/adapters/index.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "jev-store-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const store = createStatusStore({ dir });
+  const statusId = `injected-store-${process.pid}`;
+
+  await routeTurn({
+    prompt: "rename a variable",
+    current: "sonnet",
+    currentModel: "test-sonnet-v1",
+    models,
+    contextWindow: 200_000,
+    statusId,
+    getDefaultModel: (tier) => defaults[tier],
+    route: async () => ({ choice: "test-haiku-v1", confidence: 0.95 }),
+    store,
+  });
+
+  assert.equal(store.readStatus(statusId)?.model, "test-haiku-v1");
+  assert.equal(readStatus(statusId), null, "nothing leaks into the shared store");
+});

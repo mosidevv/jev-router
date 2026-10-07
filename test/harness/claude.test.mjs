@@ -40,6 +40,7 @@ runAdapterConformance({
       { id: "claude-opus-4-8-conformance", display_name: "Claude Opus Conformance" },
     ],
   },
+  expectedFallbackModel: "claude-opus-4-8-conformance",
   expectedCatalogModelIds: [
     "claude-sonnet-5-conformance",
     "claude-opus-4-8-conformance",
@@ -423,4 +424,84 @@ test("leaves a real model the user chose during the session alone", () => {
 
 test("a missing or unreadable settings file is not an error", () => {
   assert.equal(restoreSavedModel("opus", join(tmpdir(), "nope", "settings.json")), false);
+});
+
+// Regression tests for behavior the pipeline extraction dropped; see PR #44 review.
+async function claudeUpstream(t, catalog) {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.url.startsWith("/v1/models")) return res.end(JSON.stringify({ data: catalog }));
+      seen.push(JSON.parse(Buffer.concat(chunks)));
+      res.end('{"id":"msg_1","type":"message"}');
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  t.after(() => upstream.close());
+  return { seen, upstreamURL: `http://127.0.0.1:${upstream.address().port}` };
+}
+
+const postMessages = (port, body) =>
+  fetch(`http://127.0.0.1:${port}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+test("a fallback uses the account's catalog model, not the static id", async (t) => {
+  const { seen, upstreamURL } = await claudeUpstream(t, [{ id: "claude-opus-4-6" }]);
+  const { port, close } = await startProxy({ upstreamURL, route: async () => null });
+  t.after(close);
+
+  await fetch(`http://127.0.0.1:${port}/v1/models`).then((r) => r.json());
+  await postMessages(port, { model: "jev-router", tools: claudeTools, messages: [{ role: "user", content: "hi" }] });
+
+  assert.equal(seen[0].model, "claude-opus-4-6");
+});
+
+test("an explain turn leaves the recorded decision in place", async (t) => {
+  const { seen, upstreamURL } = await claudeUpstream(t, []);
+  const { port, close } = await startProxy({
+    upstreamURL,
+    route: async () => ({ choice: "claude-sonnet-5", confidence: 0.88, ms: 1 }),
+  });
+  t.after(close);
+  const statusId = `claude-explain-${process.pid}`;
+  const metadata = claudeMetadata(statusId);
+
+  await postMessages(port, { model: "jev-router", metadata, tools: claudeTools, messages: [{ role: "user", content: "rename x" }] });
+  await postMessages(port, {
+    model: "jev-router",
+    metadata,
+    tools: claudeTools,
+    messages: [
+      { role: "user", content: "rename x" },
+      { role: "assistant", content: "done" },
+      { role: "user", content: "<jev-explain>why that model?</jev-explain>" },
+    ],
+  });
+
+  const status = readStatus(statusId);
+  assert.equal(status.manual, undefined);
+  assert.equal(status.tier, "sonnet");
+  assert.equal(status.confidence, 0.88);
+  assert.notEqual(seen[1].model, "jev-router");
+});
+
+test("an unreachable upstream answers in Anthropic's error shape", async (t) => {
+  const closed = http.createServer();
+  await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
+  const upstreamURL = `http://127.0.0.1:${closed.address().port}`;
+  await new Promise((resolve) => closed.close(resolve));
+  const { port, close } = await startProxy({ upstreamURL, route: async () => null });
+  t.after(close);
+
+  const response = await postMessages(port, { model: "claude-sonnet-5", messages: [{ role: "user", content: "hi" }] });
+  const body = await response.json();
+  assert.equal(response.status, 502);
+  assert.equal(body.type, "error");
+  assert.equal(typeof body.error.message, "string");
 });

@@ -100,7 +100,7 @@ export function createStatusStore({ dir = DEFAULT_STATUS_DIR } = {}) {
 
 // The process-wide store. Every existing caller keeps the behavior it had before stores
 // existed, including sharing one directory across harnesses.
-const defaultStore = createStatusStore();
+export const defaultStore = createStatusStore();
 
 export const writeStatus = defaultStore.writeStatus;
 export const writeDecision = defaultStore.writeDecision;

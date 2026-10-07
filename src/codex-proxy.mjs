@@ -177,18 +177,22 @@ export function jevDecisionEvents({ tier, model = codexModelOf(tier), confidence
 /**
  * Adapter for Codex / OpenAI API.
  */
-function createCodexAdapter(catalogMap) {
+function createCodexAdapter(catalogMap, statusId = "") {
   return {
     contextWindow: 128000, // Codex context window
-    upstreamURL: CHATGPT_BASE_URL,
-    statusId: "", // Will be set by startCodexProxy
+    statusId,
 
     isRoutingRequest(req, body) {
       return req.method === "POST" && /\/responses(?:\?|$)/.test(req.url ?? "") && body.model === CODEX_AUTO_MODEL;
     },
 
+    // Only a real user turn reflects the user's choice. Codex's auxiliary calls (titles,
+    // summaries), tool continuations and explain turns must not flip the status to manual.
     isManualChoice(req, body) {
-      return req.method === "POST" && /\/responses(?:\?|$)/.test(req.url ?? "") && body.model !== CODEX_AUTO_MODEL;
+      if (req.method !== "POST" || !/\/responses(?:\?|$)/.test(req.url ?? "")) return false;
+      if (body.model === CODEX_AUTO_MODEL) return false;
+      const prompt = codexNewTurnPrompt(body);
+      return !!prompt && !prompt.includes("<jev-explain>") && !/^\$jev-explain\b/i.test(prompt);
     },
 
     conversationKey(body) {
@@ -199,12 +203,17 @@ function createCodexAdapter(catalogMap) {
       return codexNewTurnPrompt(body);
     },
 
-    getModels(catalog) {
+    getModels() {
       return codexModels(catalogMap);
     },
 
+    // The account's own catalog wins, so a fallback never names a model it cannot reach.
     getDefaultModel(tier) {
-      return codexModelOf(tier);
+      return codexModels(catalogMap).find((model) => model.tier === tier)?.id ?? codexModelOf(tier);
+    },
+
+    contextTokens(body) {
+      return Math.round(JSON.stringify(body.input ?? "").length / 4);
     },
 
     applyTier(body, tier, model) {
@@ -257,8 +266,7 @@ export async function startCodexProxy({
   statusId = "",
 } = {}) {
   const models = new Map();
-  const adapter = createCodexAdapter(models);
-  adapter.statusId = statusId;
+  const adapter = createCodexAdapter(models, statusId);
 
   return genericProxy({
     adapter,

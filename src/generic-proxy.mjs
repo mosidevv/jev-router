@@ -4,18 +4,22 @@ import { writeFileSync } from "node:fs";
 import { askJev } from "./lib/router.mjs";
 import { routeTurn } from "./lib/route-turn.mjs";
 import { log } from "./lib/log.mjs";
-import { writeStatus } from "./lib/status.mjs";
+import { defaultStore } from "./lib/status.mjs";
 import { validateAdapter } from "./adapters/index.mjs";
 
 const debug = (line) => process.env.JEV_DEBUG && log(line);
+
+// The reserved explanation marker: the Claude skill's tag anywhere, or the Codex skill name
+// as the first word. A prompt that merely mentions the skill name is still routed.
+const isExplainPrompt = (prompt) =>
+  !!prompt && (prompt.includes("<jev-explain>") || /^\$jev-explain\b/i.test(prompt));
 
 /**
  * Generic proxy that accepts a harness adapter.
  *
  * Each harness (Claude, Codex, Agent Orchestrator, etc.) has a different wire protocol
- * for requests and responses. This proxy parametrizes the routing logic — the eight-step
- * pipeline that appears in both proxy.mjs and codex-proxy.mjs — and delegates the protocol
- * details to an adapter.
+ * for requests and responses. This proxy owns the routing pipeline once and delegates the
+ * protocol details to an adapter; proxy.mjs and codex-proxy.mjs are the two bundled ones.
  *
  * The adapter must provide:
  *
@@ -27,19 +31,22 @@ const debug = (line) => process.env.JEV_DEBUG && log(line);
  *   - applyTier(body, tier, model) → body: Mutate the request for this tier.
  *   - getDefaultModel(tier) → string: Fallback model id for a tier.
  *   - decorateModelCatalog(catalog, catalogMap) → void (optional): Ingest/decorate a model catalog.
- *   - decorateResponse(res, response, routing) → void: Inject harness-specific feedback.
+ *   - decorateResponse(res, response, routing) → void (optional): Inject harness-specific feedback.
+ *   - isManualChoice(req, body) → boolean (optional): A real turn on a model the user picked.
+ *   - contextTokens(body) → number (optional): Context estimate; defaults to a size heuristic.
+ *   - upstreamErrorBody(message) → object (optional): The harness's error shape for a 502.
  *   - contextWindow: tokens in the harness's context (200000 for Anthropic, etc).
  *   - statusId (optional): A fixed id or (body, conversationKey) → id for status writes.
  *
- * upstreamURL may be a fixed string or a (req) → string resolver.
- *
- * Adapters Claude Code and Codex both export their adapter structure from their own files.
+ * upstreamURL may be a fixed string or a (req) → string resolver. `store` is where decisions
+ * are recorded; it defaults to the shared $TMPDIR/jev-claude store that jev-explain reads.
  */
 export async function genericProxy({
   adapter,
   upstreamURL,
   route = askJev,
   catalog = new Map(),
+  store = defaultStore,
 } = {}) {
   validateAdapter(adapter);
 
@@ -78,12 +85,14 @@ export async function genericProxy({
           const state = stateFor(key);
           const current = state.tier ?? "opus";
           const prompt = adapter.newTurnPrompt?.(body);
-          const explaining = prompt?.includes("<jev-explain>") || prompt?.includes("$jev-explain");
+          const explaining = isExplainPrompt(prompt);
 
           if (prompt && !explaining) {
             const models = adapter.getModels?.(catalog) ?? [];
             const currentModel = state.model ?? adapter.getDefaultModel?.(current);
-            const contextTokens = Math.round(JSON.stringify(body.messages ?? body.input ?? "").length / 4);
+            const contextTokens = adapter.contextTokens
+              ? adapter.contextTokens(body)
+              : Math.round(JSON.stringify(body.messages ?? body.input ?? "").length / 4);
             const statusKey =
               typeof adapter.statusId === "function"
                 ? adapter.statusId(body, key)
@@ -99,6 +108,7 @@ export async function genericProxy({
               statusId: statusKey,
               getDefaultModel: (tier) => adapter.getDefaultModel?.(tier),
               route: async (input) => (jev = await route(input)),
+              store,
             });
             state.tier = decision.tier;
             state.model = decision.model;
@@ -116,14 +126,8 @@ export async function genericProxy({
                 `${current} -> ${decision.tier} (${decision.reason}) ctx~${contextTokens} | ${prompt.slice(0, 60)}`,
             );
 
-          } else if (prompt) {
-            // Explaining request — skip routing but mark as manual if it's a real turn.
-            const statusKey =
-              typeof adapter.statusId === "function"
-                ? adapter.statusId(body, key)
-                : adapter.statusId || "";
-            writeStatus(statusKey, { manual: true, at: Date.now() });
           }
+          // An explain turn writes nothing: the decision it explains must still be on disk.
 
           // The sentinel is not a real model, so every routed request must be rewritten.
           const tier = state.tier ?? current;
@@ -137,7 +141,7 @@ export async function genericProxy({
               typeof adapter.statusId === "function"
                 ? adapter.statusId(body, key)
                 : adapter.statusId || "";
-            writeStatus(statusKey, { manual: true, at: Date.now() });
+            store.writeStatus(statusKey, { manual: true, at: Date.now() });
           }
         }
 
@@ -155,6 +159,9 @@ export async function genericProxy({
       delete headers["content-length"];
       const isModels = req.method === "GET" && /\/models(?:\?|$)/.test(req.url ?? "");
       if (isModels) delete headers["accept-encoding"];
+      // Under JEV_DEBUG, ask for an uncompressed stream so the model the API reports can be
+      // read back out of it. Not worth the bandwidth cost in normal operation.
+      if (process.env.JEV_DEBUG) delete headers["accept-encoding"];
 
       const upstream = transport.request(
         {
@@ -165,6 +172,18 @@ export async function genericProxy({
           headers,
         },
         (response) => {
+          // Report the model the API itself says it used, so routing can be confirmed from
+          // the wire rather than trusted from our own decision log.
+          if (process.env.JEV_DEBUG) {
+            let seen = false;
+            response.on("data", (c) => {
+              if (seen) return;
+              const m = /"model"\s*:\s*"([^"]+)"/.exec(c.toString("utf8"));
+              if (!m) return;
+              seen = true;
+              debug(`${response.statusCode} served by ${m[1]}`);
+            });
+          }
           // Special handling for model catalog endpoints.
           if (isModels && adapter.decorateModelCatalog) {
             const chunks = [];
@@ -201,7 +220,10 @@ export async function genericProxy({
       upstream.on("error", (err) => {
         debug(`upstream error: ${err.message}`);
         if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: { message: err.message, type: "proxy_error" } }));
+        const errorBody = adapter.upstreamErrorBody?.(err.message) ?? {
+          error: { message: err.message, type: "proxy_error" },
+        };
+        res.end(JSON.stringify(errorBody));
       });
 
       if (out.length) upstream.write(out);

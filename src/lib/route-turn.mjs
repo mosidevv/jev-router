@@ -1,7 +1,7 @@
 import { availableTiers, shouldUseExactModel } from "./config.mjs";
 import { decide } from "./policy.mjs";
 import { askJev } from "./router.mjs";
-import { writeDecision } from "./status.mjs";
+import { defaultStore } from "./status.mjs";
 
 /**
  * Route one new user turn without assuming any harness or wire protocol.
@@ -32,6 +32,7 @@ export async function routeTurn({
   statusId = "",
   getDefaultModel = (tier) => models.find((model) => model.tier === tier)?.id,
   route = askJev,
+  store = defaultStore,
 }) {
   // Disabled tiers are not offered to Jev, matching the proxy's historical behavior.
   const routedModels = models.filter((model) => availableTiers().includes(model.tier));
@@ -66,7 +67,7 @@ export async function routeTurn({
   };
 
   if (statusId) {
-    writeDecision(statusId, {
+    store.writeDecision(statusId, {
       tier,
       prompt,
       model,
