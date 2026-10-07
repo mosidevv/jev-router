@@ -19,7 +19,7 @@ The native caller must update its own current tier/model after each decision, es
 
 `genericProxy({ adapter, upstreamURL, route, catalog, store })` validates the adapter once, starts a loopback HTTP server, and then handles each request in this order:
 
-1. A `HEAD` probe receives `200` immediately. No adapter hook runs.
+1. A request whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>`, or that carries any other `Origin`, receives `403` and goes no further. This keeps web pages out, whether they arrive by DNS rebinding or a cross-site form post, so point a harness at the proxy by loopback address. A `HEAD` probe receives `200` immediately. No adapter hook runs for either.
 2. The proxy buffers the request body and tries to parse JSON. If parsing succeeds, `normalizeRequest(body)` runs first when supplied.
 3. `isRoutingRequest(req, body)` decides whether the request carries the router's sentinel model. A false result takes the manual-choice branch described below.
 4. For a routed request, `conversationKey(body)` finds its routing state and `newTurnPrompt(body)` classifies it:
