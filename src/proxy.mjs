@@ -87,10 +87,11 @@ export function claudeModels(catalog = []) {
         model.created_at && `released ${model.created_at.slice(0, 10)}`,
         model.max_input_tokens && `${model.max_input_tokens} input tokens`,
       ].filter(Boolean).join("; "),
+      maxInputTokens: model.max_input_tokens || TIERS.find((tier) => tier.id === model.id)?.maxInputTokens,
     }));
   return models.length
     ? models
-    : TIERS.map((tier) => ({ id: tier.id, tier: tier.name, description: tier.id }));
+    : TIERS.map((tier) => ({ id: tier.id, tier: tier.name, description: tier.id, maxInputTokens: tier.maxInputTokens }));
 }
 
 /**
@@ -178,6 +179,12 @@ function createClaudeAdapter(catalogMap) {
 
     contextTokens(body) {
       return Math.round(JSON.stringify(body.messages ?? "").length / 4);
+    },
+
+    // Claude Code's system prompt and tool definitions can be most of a request: with many
+    // MCP servers they alone can exceed Haiku's window.
+    requestTokens(body) {
+      return Math.round(JSON.stringify([body.system ?? "", body.tools ?? [], body.messages ?? ""]).length / 4);
     },
 
     upstreamErrorBody(message) {

@@ -14,9 +14,13 @@ import { TIER_NAMES } from "../config.mjs";
  * for, which may be an older version within the same tier such as `claude-sonnet-4-6`. The
  * capability flags come from the Agent SDK's model catalog: Haiku supports neither adaptive
  * thinking nor effort, so those fields have to be stripped when routing down to it.
+ *
+ * `maxInputTokens` is set only where it is known: the API reported Haiku 4.5's limit as
+ * 200000 when a request exceeded it. It is the fallback for print-mode runs, where Claude
+ * Code never fetches the model catalog; the catalog's own `max_input_tokens` wins otherwise.
  */
 export const TIERS = [
-  { name: "haiku", id: "claude-haiku-4-5-20251001", family: "haiku", thinking: false, effort: false },
+  { name: "haiku", id: "claude-haiku-4-5-20251001", family: "haiku", thinking: false, effort: false, maxInputTokens: 200000 },
   { name: "sonnet", id: "claude-sonnet-5", family: "sonnet", thinking: true, effort: true },
   { name: "opus", id: "claude-opus-5", family: "opus", thinking: true, effort: true },
   { name: "fable", id: "claude-fable-5-1", family: "fable", thinking: true, effort: true },

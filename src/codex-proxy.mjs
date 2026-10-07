@@ -45,6 +45,7 @@ export function codexModels(models = new Map()) {
         model.description,
         model.context_window && `${model.context_window} context tokens`,
       ].filter(Boolean).join("; "),
+      maxInputTokens: model.context_window || undefined,
     }))
     .filter((model) => model.tier);
   return available.length
@@ -214,6 +215,10 @@ function createCodexAdapter(catalogMap, statusId = "") {
 
     contextTokens(body) {
       return Math.round(JSON.stringify(body.input ?? "").length / 4);
+    },
+
+    requestTokens(body) {
+      return Math.round(JSON.stringify([body.instructions ?? "", body.tools ?? [], body.input ?? ""]).length / 4);
     },
 
     applyTier(body, tier, model) {

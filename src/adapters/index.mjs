@@ -17,6 +17,7 @@ export { createStatusStore, readStatus } from "../lib/status.mjs";
  * @property {string} id Exact upstream model identifier.
  * @property {AdapterTier} tier Shared routing tier for the model.
  * @property {string} [description] Model information shown to the router.
+ * @property {number} [maxInputTokens] Input window; models too small for a request are skipped.
  */
 
 /**
@@ -34,6 +35,7 @@ export { createStatusStore, readStatus } from "../lib/status.mjs";
  * @property {(modelCatalog: object, catalog: Map<string, object>) => void} [decorateModelCatalog]
  * @property {(res: import("node:http").ServerResponse, response: import("node:http").IncomingMessage, routing: object) => void} [decorateResponse]
  * @property {(body: object) => number} [contextTokens]
+ * @property {(body: object) => number} [requestTokens]
  * @property {(message: string) => object} [upstreamErrorBody]
  * @property {string | ((body: object, conversationKey: string) => string)} [statusId]
  * @property {number} contextWindow
@@ -54,6 +56,7 @@ const OPTIONAL_FUNCTIONS = [
   "decorateModelCatalog",
   "decorateResponse",
   "contextTokens",
+  "requestTokens",
   "upstreamErrorBody",
 ];
 

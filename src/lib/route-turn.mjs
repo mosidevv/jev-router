@@ -1,4 +1,4 @@
-import { availableTiers, shouldUseExactModel } from "./config.mjs";
+import { availableTiers, shouldUseExactModel, THRESHOLDS } from "./config.mjs";
 import { decide } from "./policy.mjs";
 import { askJev } from "./router.mjs";
 import { defaultStore } from "./status.mjs";
@@ -14,8 +14,12 @@ import { defaultStore } from "./status.mjs";
  * @param {string} input.prompt
  * @param {string} input.current Current routing tier.
  * @param {string} input.currentModel Exact model currently in use.
- * @param {Array<{id: string, tier: string, description?: string}>} input.models
- * @param {number} input.contextTokens
+ * @param {Array<{id: string, tier: string, description?: string, maxInputTokens?: number}>} input.models
+ *   `maxInputTokens`, when known, is the model's input window.
+ * @param {number} input.contextTokens Size of the conversation, for the cache-rebuild guard.
+ * @param {number} [input.requestTokens] Size of the whole request (system prompt, tools and
+ *   conversation). A model whose window cannot hold it is treated as unavailable, so policy
+ *   steps up to one that can. Defaults to `contextTokens`.
  * @param {number} input.contextWindow
  * @param {string} [input.statusId]
  * @param {(tier: string) => string} [input.getDefaultModel]
@@ -28,6 +32,7 @@ export async function routeTurn({
   currentModel,
   models = [],
   contextTokens = 0,
+  requestTokens = contextTokens,
   contextWindow,
   statusId = "",
   getDefaultModel = (tier) => models.find((model) => model.tier === tier)?.id,
@@ -35,7 +40,11 @@ export async function routeTurn({
   store = defaultStore,
 }) {
   // Disabled tiers are not offered to Jev, matching the proxy's historical behavior.
-  const routedModels = models.filter((model) => availableTiers().includes(model.tier));
+  // So are models too small for the request: the API would reject the turn outright.
+  const fits = (model) =>
+    !model?.maxInputTokens || requestTokens <= model.maxInputTokens * THRESHOLDS.contextHeadroom;
+  const fitsId = (id) => fits(models.find((model) => model.id === id));
+  const routedModels = models.filter((model) => availableTiers().includes(model.tier) && fits(model));
   const available = [...new Set(routedModels.map((model) => model.tier))];
 
   const jevAnswer = await route({
@@ -50,11 +59,15 @@ export async function routeTurn({
   const tierAnswer = jevAnswer && { ...jevAnswer, choice: chosen?.tier };
   const policy = decide({ prompt, jev: tierAnswer, current, available, contextTokens });
   const tier = policy.tier;
+  const fallback = () => {
+    const preferred = getDefaultModel?.(tier);
+    return fitsId(preferred) ? preferred : (routedModels.find((m) => m.tier === tier)?.id ?? preferred);
+  };
   const model = shouldUseExactModel(policy.reason, chosen?.tier, tier)
     ? chosen.id
-    : tier === current
+    : tier === current && fitsId(currentModel)
       ? currentModel
-      : getDefaultModel?.(tier);
+      : fallback();
 
   const decision = {
     tier,

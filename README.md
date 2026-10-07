@@ -195,6 +195,8 @@ One Jev call per fresh user turn selects a shared abstract tier:
 - low confidence never downgrades and caps upgrades at the balanced tier;
 - large conversations refuse downgrades that would waste more prompt-cache work than they save;
 - unavailable tiers step upward rather than silently choosing a weaker model;
+- a model whose context window cannot hold the whole request, including the system prompt and
+  tool definitions, counts as unavailable;
 - the long tier is disabled unless `JEV_ALLOW_FABLE=1`.
 
 Tool-loop continuations keep the tier chosen at the start of the turn. Main conversations and

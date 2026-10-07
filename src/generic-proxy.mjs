@@ -34,6 +34,8 @@ const isExplainPrompt = (prompt) =>
  *   - decorateResponse(res, response, routing) → void (optional): Inject harness-specific feedback.
  *   - isManualChoice(req, body) → boolean (optional): A real turn on a model the user picked.
  *   - contextTokens(body) → number (optional): Context estimate; defaults to a size heuristic.
+ *   - requestTokens(body) → number (optional): Whole-request size, checked against each
+ *     model's maxInputTokens; defaults to contextTokens.
  *   - upstreamErrorBody(message) → object (optional): The harness's error shape for a 502.
  *   - contextWindow: tokens in the harness's context (200000 for Anthropic, etc).
  *   - statusId (optional): A fixed id or (body, conversationKey) → id for status writes.
@@ -93,6 +95,7 @@ export async function genericProxy({
             const contextTokens = adapter.contextTokens
               ? adapter.contextTokens(body)
               : Math.round(JSON.stringify(body.messages ?? body.input ?? "").length / 4);
+            const requestTokens = adapter.requestTokens?.(body) ?? contextTokens;
             const statusKey =
               typeof adapter.statusId === "function"
                 ? adapter.statusId(body, key)
@@ -104,6 +107,7 @@ export async function genericProxy({
               currentModel,
               models,
               contextTokens,
+              requestTokens,
               contextWindow: adapter.contextWindow,
               statusId: statusKey,
               getDefaultModel: (tier) => adapter.getDefaultModel?.(tier),
@@ -123,7 +127,7 @@ export async function genericProxy({
             };
             debug(
               `${key} ${jev ? `${jev.ms}ms p=${jev.confidence.toFixed(2)}` : "no-jev"} ` +
-                `${current} -> ${decision.tier} (${decision.reason}) ctx~${contextTokens} | ${prompt.slice(0, 60)}`,
+                `${current} -> ${decision.tier} (${decision.reason}) ctx~${contextTokens} req~${requestTokens} | ${prompt.slice(0, 60)}`,
             );
 
           }

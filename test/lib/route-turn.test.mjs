@@ -149,3 +149,65 @@ test("routeTurn records into an injected store, not the shared one", async (t) =
   assert.equal(store.readStatus(statusId)?.model, "test-haiku-v1");
   assert.equal(readStatus(statusId), null, "nothing leaks into the shared store");
 });
+
+test("a model whose window cannot hold the request is skipped, and policy steps up", async () => {
+  const sized = [
+    { id: "test-haiku-v1", tier: "haiku", maxInputTokens: 200_000 },
+    { id: "test-sonnet-v1", tier: "sonnet", maxInputTokens: 1_000_000 },
+    { id: "test-opus-v2", tier: "opus" },
+  ];
+  let offered;
+  const decision = await routeTurn({
+    prompt: "what is 2+2?",
+    current: "opus",
+    currentModel: "test-opus-v2",
+    models: sized,
+    contextTokens: 7_000,
+    requestTokens: 218_000,
+    contextWindow: 200_000,
+    getDefaultModel: (tier) => defaults[tier],
+    route: async (input) => ((offered = input.models), { choice: "test-haiku-v1", confidence: 1 }),
+  });
+
+  assert.deepEqual(offered.map((m) => m.id), ["test-sonnet-v1", "test-opus-v2"], "Jev is not offered a model that cannot fit");
+  assert.notEqual(decision.tier, "haiku");
+});
+
+test("a conversation that outgrows its current model moves to one that fits", async () => {
+  const decision = await routeTurn({
+    prompt: "keep going",
+    current: "haiku",
+    currentModel: "test-haiku-v1",
+    models: [
+      { id: "test-haiku-v1", tier: "haiku", maxInputTokens: 200_000 },
+      { id: "test-sonnet-v1", tier: "sonnet" },
+    ],
+    contextTokens: 190_000,
+    requestTokens: 190_000,
+    contextWindow: 200_000,
+    getDefaultModel: (tier) => defaults[tier],
+    route: async () => null,
+  });
+
+  assert.equal(decision.tier, "sonnet");
+  assert.equal(decision.model, "test-sonnet-v1");
+});
+
+test("headroom keeps a request just under the window off that model", async () => {
+  const decision = await routeTurn({
+    prompt: "small task",
+    current: "sonnet",
+    currentModel: "test-sonnet-v1",
+    models: [
+      { id: "test-haiku-v1", tier: "haiku", maxInputTokens: 200_000 },
+      { id: "test-sonnet-v1", tier: "sonnet" },
+    ],
+    contextTokens: 1_000,
+    requestTokens: 195_000,
+    contextWindow: 200_000,
+    getDefaultModel: (tier) => defaults[tier],
+    route: async () => ({ choice: "test-haiku-v1", confidence: 1 }),
+  });
+
+  assert.equal(decision.tier, "sonnet");
+});

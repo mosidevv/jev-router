@@ -505,3 +505,46 @@ test("an unreachable upstream answers in Anthropic's error shape", async (t) => 
   assert.equal(body.type, "error");
   assert.equal(typeof body.error.message, "string");
 });
+
+test("print mode with a large system prompt never routes to a model too small for it", async (t) => {
+  // No catalog fetch, as in `claude -p`: Haiku's window comes from the static tier table.
+  const { seen, upstreamURL } = await claudeUpstream(t, []);
+  let offered;
+  const { port, close } = await startProxy({
+    upstreamURL,
+    route: async ({ models }) => ((offered = models), { choice: "claude-haiku-4-5-20251001", confidence: 1, ms: 1 }),
+  });
+  t.after(close);
+
+  await postMessages(port, {
+    model: "jev-router",
+    system: "x".repeat(880_000), // ~220k tokens, past Haiku's 200k window
+    tools: claudeTools,
+    messages: [{ role: "user", content: "what is 2+2?" }],
+  });
+
+  assert.equal(offered.some((m) => m.tier === "haiku"), false);
+  assert.ok(!seen[0].model.includes("haiku"), `forwarded ${seen[0].model}`);
+});
+
+test("the catalog's max_input_tokens decides which models fit", async (t) => {
+  const { seen, upstreamURL } = await claudeUpstream(t, [
+    { id: "claude-sonnet-small", max_input_tokens: 100_000 },
+    { id: "claude-opus-big", max_input_tokens: 1_000_000 },
+  ]);
+  const { port, close } = await startProxy({
+    upstreamURL,
+    route: async () => ({ choice: "claude-sonnet-small", confidence: 1, ms: 1 }),
+  });
+  t.after(close);
+
+  await fetch(`http://127.0.0.1:${port}/v1/models`).then((r) => r.json());
+  await postMessages(port, {
+    model: "jev-router",
+    system: "x".repeat(600_000), // ~150k tokens
+    tools: claudeTools,
+    messages: [{ role: "user", content: "rename x" }],
+  });
+
+  assert.equal(seen[0].model, "claude-opus-big");
+});

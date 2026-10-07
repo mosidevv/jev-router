@@ -49,6 +49,12 @@ export const THRESHOLDS = {
   jevTimeoutMs: 1500,
   jevDeadlineMs: 3000,
   jevMaxRetries: 1,
+  /**
+   * Share of a model's input window a request may fill before routing treats that model as
+   * unavailable. Request size is a characters/4 estimate, which runs low: one Claude Code
+   * request estimated at ~188k was ~219k by the API's count, about 14% under. 0.8 covers that.
+   */
+  contextHeadroom: 0.8,
 };
 
 /**
